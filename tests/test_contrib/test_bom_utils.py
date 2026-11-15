@@ -19,9 +19,13 @@
 from unittest import TestCase
 
 from cyclonedx.contrib.bom.utils import BomDependencyGraphFlatMerger, BomRefDiscriminator
+from cyclonedx.exception.model import AmbiguousBomRefException
 from cyclonedx.model.bom import Bom
 from cyclonedx.model.bom_ref import BomRef
+from cyclonedx.model.component import Component
 from cyclonedx.model.dependency import Dependency
+from cyclonedx.model.service import Service
+from cyclonedx.model.vulnerability import BomTarget, Vulnerability
 
 
 class TestBomRefDiscriminator(TestCase):
@@ -48,6 +52,64 @@ class TestBomRefDiscriminator(TestCase):
             self.assertNotEqual(bomref1.value, bomref2.value, 'should be discriminated')
         self.assertEqual('djdlkfjdslkf', bomref1.value)
         self.assertEqual('djdlkfjdslkf', bomref2.value)
+
+    def test_from_bom_leaves_unique_referenced_refs_untouched(self) -> None:
+        component = Component(name='foo', bom_ref='foo-ref')
+        target = BomTarget(ref='foo-ref')
+        bom = Bom(components=[component])
+        bom.vulnerabilities.add(Vulnerability(bom_ref='vuln-ref', id='CVE-1', affects=[target]))
+        with BomRefDiscriminator.from_bom(bom):
+            self.assertEqual('foo-ref', component.bom_ref.value)
+            self.assertEqual('foo-ref', target.ref)
+        self.assertEqual('foo-ref', component.bom_ref.value)
+        self.assertEqual('foo-ref', target.ref)
+
+    def test_from_bom_discriminates_unreferenced_duplicates(self) -> None:
+        component1 = Component(name='foo', bom_ref='dup-ref')
+        component2 = Component(name='bar', bom_ref='dup-ref')
+        bom = Bom(components=[component1, component2])
+        bom.vulnerabilities.add(Vulnerability(
+            bom_ref='vuln-ref', id='CVE-1', affects=[BomTarget(ref='other-ref')]))
+        with BomRefDiscriminator.from_bom(bom):
+            self.assertNotEqual(component1.bom_ref.value, component2.bom_ref.value)
+            self.assertIn('dup-ref', (component1.bom_ref.value, component2.bom_ref.value))
+        self.assertEqual('dup-ref', component1.bom_ref.value)
+        self.assertEqual('dup-ref', component2.bom_ref.value)
+
+    def test_from_bom_raises_on_ambiguous_reference(self) -> None:
+        component1 = Component(name='foo', bom_ref='dup-ref')
+        component2 = Component(name='bar', bom_ref='dup-ref')
+        target = BomTarget(ref='dup-ref')
+        bom = Bom(components=[component1, component2])
+        bom.vulnerabilities.add(Vulnerability(bom_ref='vuln-ref', id='CVE-1', affects=[target]))
+        discr = BomRefDiscriminator.from_bom(bom)
+        with self.assertRaises(AmbiguousBomRefException):
+            discr.discriminate()
+        # bom-refs must be unmodified, as discrimination was refused
+        self.assertEqual('dup-ref', component1.bom_ref.value)
+        self.assertEqual('dup-ref', component2.bom_ref.value)
+        self.assertEqual('dup-ref', target.ref)
+
+    def test_from_bom_raises_on_ambiguous_reference_with(self) -> None:
+        component1 = Component(name='foo', bom_ref='dup-ref')
+        component2 = Component(name='bar', bom_ref='dup-ref')
+        bom = Bom(components=[component1, component2])
+        bom.vulnerabilities.add(Vulnerability(
+            bom_ref='vuln-ref', id='CVE-1', affects=[BomTarget(ref='dup-ref')]))
+        with self.assertRaises(AmbiguousBomRefException):
+            with BomRefDiscriminator.from_bom(bom):
+                pass  # pragma: no cover
+        self.assertEqual('dup-ref', component1.bom_ref.value)
+        self.assertEqual('dup-ref', component2.bom_ref.value)
+
+    def test_from_bom_raises_on_ambiguous_service_reference(self) -> None:
+        component = Component(name='foo', bom_ref='dup-ref')
+        service = Service(name='bar', bom_ref='dup-ref')
+        bom = Bom(components=[component], services=[service])
+        bom.vulnerabilities.add(Vulnerability(
+            bom_ref='vuln-ref', id='CVE-1', affects=[BomTarget(ref='dup-ref')]))
+        with self.assertRaises(AmbiguousBomRefException):
+            BomRefDiscriminator.from_bom(bom).discriminate()
 
 
 class TestBomDependencyGraphFlatMerger(TestCase):

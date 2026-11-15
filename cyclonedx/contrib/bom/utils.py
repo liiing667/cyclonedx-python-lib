@@ -22,16 +22,19 @@ __all__ = [
     'BomDependencyGraphFlatMerger',
 ]
 
+from collections import Counter
 from collections.abc import Iterable
 from itertools import chain
 from random import random
 from typing import TYPE_CHECKING, Any
 
+from ...exception.model import AmbiguousBomRefException
 from ...model.dependency import Dependency
 
 if TYPE_CHECKING:  # pragma: no cover
     from ...model.bom import Bom
     from ...model.bom_ref import BomRef
+    from ...model.vulnerability import BomTarget
 
 
 class BomRefDiscriminator:
@@ -44,12 +47,28 @@ class BomRefDiscriminator:
     duplicates an earlier one.
     All original values are preserved and can be restored via :meth:`reset()`
     or by using this class as a context manager.
+
+    Additionally, string references to bom-ref values — like
+    :attr:`cyclonedx.model.vulnerability.BomTarget.ref` — may be provided.
+    These references are kept in sync with the discriminated BomRefs:
+    references to unique values stay valid, as the first occurrence of a
+    value is never renamed. References to values that are used by more than
+    one BomRef cannot be unambiguously resolved — in this case
+    :meth:`discriminate()` refuses to run and raises
+    :class:`cyclonedx.exception.model.AmbiguousBomRefException` instead of
+    producing dangling references.
     """
 
-    def __init__(self, bomrefs: Iterable['BomRef'], prefix: str = 'BomRef') -> None:
+    def __init__(
+        self,
+        bomrefs: Iterable['BomRef'],
+        prefix: str = 'BomRef',
+        references: Iterable['BomTarget'] = (),
+    ) -> None:
         # NOTE: do not use dict/set here, different BomRefs with same value
         #       have same hash and would shadow each other.
         self._bomrefs = tuple((bomref, bomref.value) for bomref in bomrefs)
+        self._references = tuple((reference, reference.ref) for reference in references)
         self._prefix = prefix
 
     def __enter__(self) -> None:
@@ -65,7 +84,13 @@ class BomRefDiscriminator:
 
         Any BomRef whose ``value`` is ``None`` or duplicates a previously
         encountered value is assigned a newly generated unique identifier.
+
+        :raises AmbiguousBomRefException:
+            if a provided reference points to a bom-ref value that is used
+            by more than one BomRef, and therefore cannot be unambiguously
+            resolved after discrimination.
         """
+        self._assert_unambiguous_references()
         known_values = []
         for bomref, _ in self._bomrefs:
             value = bomref.value
@@ -85,6 +110,29 @@ class BomRefDiscriminator:
     def _make_unique(self) -> str:
         return f'{self._prefix}{str(random())[1:]}{str(random())[1:]}'  # nosec B311
 
+    def _assert_unambiguous_references(self) -> None:
+        """
+        Ensure that all provided references can be unambiguously resolved.
+
+        A reference to a unique bom-ref value stays valid during
+        discrimination, as the first occurrence of a value is never renamed.
+        A reference to a duplicated bom-ref value would become a dangling or
+        wrongly attributed reference after discrimination — this cannot be
+        safely disambiguated, so an error is raised instead.
+        """
+        if not self._references:
+            return
+        value_count = Counter(
+            value for _, value in self._bomrefs if value is not None)
+        for _, original_ref in self._references:
+            if original_ref is not None and value_count[original_ref] > 1:
+                raise AmbiguousBomRefException(
+                    'Unable to safely discriminate bom-refs: '
+                    f'reference to bom-ref {original_ref!r} is ambiguous, '
+                    'as this value is used by multiple objects in the Bom. '
+                    'Make all bom-ref values unique, '
+                    'or remove the ambiguous reference.')
+
     @classmethod
     def from_bom(cls, bom: 'Bom', prefix: str = 'BomRef') -> 'BomRefDiscriminator':
         """
@@ -95,12 +143,21 @@ class BomRefDiscriminator:
           * :attr:`cyclonedx.model.bom.Bom.components`
           * :attr:`cyclonedx.model.bom.Bom.services`
           * :attr:`cyclonedx.model.bom.Bom.vulnerabilities`
+
+        Additionally, all string references to bom-ref values are taken into
+        account — currently the
+        :attr:`cyclonedx.model.vulnerability.BomTarget.ref`s of all
+        :attr:`cyclonedx.model.bom.Bom.vulnerabilities`' affects.
+        References to duplicated bom-ref values cannot be unambiguously
+        resolved and cause :meth:`discriminate()` to raise
+        :class:`cyclonedx.exception.model.AmbiguousBomRefException`.
         """
         return cls(chain(
             (c.bom_ref for c in bom._get_all_components()),
             (s.bom_ref for s in bom.services),
             (v.bom_ref for v in bom.vulnerabilities),
-        ), prefix)
+        ), prefix, references=chain.from_iterable(
+            v.affects for v in bom.vulnerabilities))
 
 
 class BomDependencyGraphFlatMerger:

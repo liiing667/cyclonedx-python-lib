@@ -112,6 +112,14 @@ class UnknownComponentDependencyException(CycloneDxModelException):
     pass
 
 
+class AmbiguousBomRefException(CycloneDxModelException):
+    """
+    Exception raised when a reference to a bom-ref cannot be unambiguously resolved,
+    because the referenced bom-ref value is used by more than one object in the Bom.
+    """
+    pass
+
+
 class UnknownHashTypeException(CycloneDxModelException):
     """
     Exception raised when we are unable to determine the type of hash from a composite hash string.
